@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+public/config.yaml
+!public/config.example.yaml
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

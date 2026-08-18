@@ -1,0 +1,75 @@
+# MQTT Request Flow Visualizer Configuration
+
+mqtt:
+  url: "wss://mqtt.example.com:8084/mqtt"
+  username: "visualizer"
+  password: "change-me"
+  topic: "server/requests"
+  clientId: "request-tree-visualizer"
+
+animation:
+  edgeDurationMs: 120
+  targetFlashDurationMs: 180
+  particleSize: 5
+  particleGlow: true
+  maxParticles: 500
+
+methods:
+  GET: "#4CAF50"
+  POST: "#2196F3"
+  PUT: "#FF9800"
+  PATCH: "#9C27B0"
+  DELETE: "#F44336"
+  OPTIONS: "#607D8B"
+  HEAD: "#795548"
+  DEFAULT: "#FFFFFF"
+
+tree:
+  id: server
+  label: "Server"
+
+  children:
+
+    - id: frontend
+      label: "Frontend"
+
+      children:
+        - id: frontend-productive
+          label: "Frontend"
+          target: frontend-productive
+
+    - id: swimresults
+      label: "Swimresults"
+
+      children:
+        - id: athletes
+          label: "Athletes"
+
+          children:
+            - id: swimresults-athlete-service-productive
+              label: "Athlete Service"
+              target: swimresults-athlete-service-productive
+
+        - id: races
+          label: "Races"
+
+          children:
+            - id: swimresults-race-service-productive
+              label: "Race Service"
+              target: swimresults-race-service-productive
+
+    - id: administration
+      label: "Administration"
+
+      children:
+        - id: admin-api
+          label: "Admin API"
+
+          children:
+            - id: admin-user-service
+              label: "User Service"
+              target: admin-user-service
+
+            - id: admin-event-service
+              label: "Event Service"
+              target: admin-event-service
