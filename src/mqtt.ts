@@ -1,10 +1,11 @@
-import * as mqtt from "mqtt";
+import mqtt from "mqtt";
+import type { MqttClient } from "mqtt";
 import { RequestEvent, MQTTConfig } from "./types";
 
 export type MQTTCallback = (event: RequestEvent | null, error?: string) => void;
 
 export class MQTTClient {
-  private client: mqtt.MqttClient | null = null;
+  private client: MqttClient | null = null;
   private config: MQTTConfig;
   private connected = false;
   private listeners: MQTTCallback[] = [];
@@ -43,7 +44,7 @@ export class MQTTClient {
           this.notifyListeners(null, "MQTT Disconnected");
         });
 
-        this.client.on("error", (err) => {
+        this.client.on("error", (err: Error) => {
           console.error("MQTT error:", err);
           this.notifyListeners(null, `MQTT Error: ${err.message}`);
           if (!this.connected) {

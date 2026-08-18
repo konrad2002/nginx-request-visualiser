@@ -3,7 +3,6 @@ import { AppConfig, Particle, DebugStats, RequestEvent, TreeNode } from "./types
 import { calculateLayout, LayoutNode, findPathToTarget } from "./tree";
 import {
   AnimationEngine,
-  buildParticlePath,
   createParticleId,
 } from "./animation";
 import { MQTTClient } from "./mqtt";
@@ -31,7 +30,7 @@ export const App: React.FC = () => {
   });
   const [reachedTargets, setReachedTargets] = useState<Set<string>>(new Set());
 
-  // Refs for non-state data
+  // Refs for non-state data and for MQTT callback
   const mqttClientRef = useRef<MQTTClient | null>(null);
   const animationEngineRef = useRef<AnimationEngine | null>(null);
   const targetMapRef = useRef<Map<string, TreeNode>>(new Map());
@@ -39,6 +38,26 @@ export const App: React.FC = () => {
   const animationFrameRef = useRef<number>();
   const lastRequestTimeRef = useRef<number>(Date.now());
   const requestCountRef = useRef<number>(0);
+  const configRef = useRef<AppConfig | null>(null);
+  const layoutTreeRef = useRef<LayoutNode | null>(null);
+  const particlesRef = useRef<Particle[]>([]);
+
+  // Keep refs in sync with state
+  useEffect(() => {
+    statsRef.current = stats;
+  }, [stats]);
+
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
+
+  useEffect(() => {
+    layoutTreeRef.current = layoutTree;
+  }, [layoutTree]);
+
+  useEffect(() => {
+    particlesRef.current = particles;
+  }, [particles]);
 
   // Load configuration
   useEffect(() => {
@@ -46,10 +65,12 @@ export const App: React.FC = () => {
       try {
         const cfg = await loadConfig("/config.yaml");
         setConfig(cfg);
+        configRef.current = cfg;
 
         // Calculate layout
         const layout = calculateLayout(cfg.tree);
         setLayoutTree(layout);
+        layoutTreeRef.current = layout;
 
         // Build target map
         const targetMap = new Map<string, TreeNode>();
@@ -70,47 +91,9 @@ export const App: React.FC = () => {
             setParticles((prev) =>
               prev.filter((p) => p.id !== id)
             );
-          },
-          (id) => {
-            // Find particle's target and mark for flash
-            setParticles((prev) => {
-              const particle = prev.find((p) => p.id === id);
-              if (particle) {
-                const targetPath = findPathToTarget(
-                  cfg.tree,
-                  particle.method // This is wrong, should track target
-                );
-              }
-              return prev;
-            });
           }
         );
         animationEngineRef.current = engine;
-
-        // Start MQTT connection
-        const mqtt = new MQTTClient(cfg.mqtt);
-        mqttClientRef.current = mqtt;
-
-        mqtt
-          .connect()
-          .then(() => {
-            setMqttConnected(true);
-
-            mqtt.subscribe((event: RequestEvent | null, error?: string) => {
-              if (error) {
-                console.error(error);
-                return;
-              }
-
-              if (event) {
-                handleRequestEvent(event, cfg);
-              }
-            });
-          })
-          .catch((err: Error) => {
-            setError(`Failed to connect to MQTT: ${err.message}`);
-            console.error(err);
-          });
       } catch (err: unknown) {
         const message =
           err instanceof Error ? err.message : String(err);
@@ -119,81 +102,103 @@ export const App: React.FC = () => {
     };
 
     loadAppConfig();
+  }, []);
+
+  // Set up MQTT connection - runs once config finishes loading
+  useEffect(() => {
+    if (!config) return;
+
+    const mqtt = new MQTTClient(config.mqtt);
+    mqttClientRef.current = mqtt;
+
+    mqtt
+      .connect()
+      .then(() => {
+        setMqttConnected(true);
+
+        // Subscribe with callback that uses refs for latest data
+        mqtt.subscribe((event: RequestEvent | null, error?: string) => {
+          if (error) {
+            console.error(error);
+            return;
+          }
+
+          if (!event || !configRef.current) return;
+
+          // Handle MQTT event using refs
+          const cfg = configRef.current;
+          statsRef.current.messagesReceived++;
+
+          const targetNode = targetMapRef.current.get(event.target);
+          if (!targetNode) {
+            statsRef.current.unknownTargets++;
+            console.warn(`Unknown target: ${event.target}`);
+            setStats({ ...statsRef.current });
+            return;
+          }
+
+          const path = findPathToTarget(cfg.tree, event.target);
+          if (!path) {
+            statsRef.current.unknownTargets++;
+            setStats({ ...statsRef.current });
+            return;
+          }
+
+          // Check particle limit
+          if (particlesRef.current.length >= cfg.animation.maxParticles) {
+            statsRef.current.eventsDropped++;
+            setStats({ ...statsRef.current });
+            return;
+          }
+
+          // Build particle path coordinates
+          const layoutCurrent = layoutTreeRef.current;
+          if (!layoutCurrent) return;
+
+          const pathCoords = path.map((node) => {
+            const layoutNode = findLayoutNode(layoutCurrent, node.id);
+            return layoutNode
+              ? { x: layoutNode.x, y: layoutNode.y }
+              : { x: 0, y: 0 };
+          });
+
+          // Create particle
+          const particle: Particle = {
+            id: createParticleId(),
+            path: pathCoords,
+            method: event.method,
+            startTime: Date.now(),
+            edgeDurationMs: cfg.animation.edgeDurationMs,
+            totalDuration:
+              (path.length - 1) * cfg.animation.edgeDurationMs +
+              cfg.animation.targetFlashDurationMs,
+          };
+
+          setParticles((prev) => [...prev, particle]);
+          animationEngineRef.current?.addParticle(particle);
+
+          statsRef.current.eventsVisualized++;
+          requestCountRef.current++;
+
+          const now = Date.now();
+          if (now - lastRequestTimeRef.current >= 1000) {
+            statsRef.current.requestsPerSec = requestCountRef.current;
+            requestCountRef.current = 0;
+            lastRequestTimeRef.current = now;
+          }
+
+          setStats({ ...statsRef.current });
+        });
+      })
+      .catch((err: Error) => {
+        setError(`Failed to connect to MQTT: ${err.message}`);
+        console.error(err);
+      });
 
     return () => {
       mqttClientRef.current?.disconnect();
     };
-  }, []);
-
-  // Update stats ref when it changes
-  useEffect(() => {
-    statsRef.current = stats;
-  }, [stats]);
-
-  const handleRequestEvent = useCallback(
-    (event: RequestEvent, cfg: AppConfig) => {
-      statsRef.current.messagesReceived++;
-
-      const targetNode = targetMapRef.current.get(event.target);
-
-      if (!targetNode) {
-        statsRef.current.unknownTargets++;
-        console.warn(`Unknown target: ${event.target}`);
-        return;
-      }
-
-      // Find path from root to target
-      const path = findPathToTarget(cfg.tree, event.target);
-      if (!path) {
-        statsRef.current.unknownTargets++;
-        return;
-      }
-
-      // Check particle limit
-      if (
-        particles.length >= cfg.animation.maxParticles
-      ) {
-        statsRef.current.eventsDropped++;
-        return;
-      }
-
-      // Build particle path coordinates
-      const pathCoords = path.map((node) => {
-        const layoutNode = findLayoutNode(layoutTree, node.id);
-        return layoutNode
-          ? { x: layoutNode.x, y: layoutNode.y }
-          : { x: 0, y: 0 };
-      });
-
-      // Create particle
-      const particle: Particle = {
-        id: createParticleId(),
-        path: pathCoords,
-        method: event.method,
-        startTime: Date.now(),
-        edgeDurationMs: cfg.animation.edgeDurationMs,
-        totalDuration:
-          (path.length - 1) * cfg.animation.edgeDurationMs +
-          cfg.animation.targetFlashDurationMs,
-      };
-
-      setParticles((prev) => [...prev, particle]);
-      animationEngineRef.current?.addParticle(particle);
-
-      statsRef.current.eventsVisualized++;
-      requestCountRef.current++;
-      
-      const now = Date.now();
-      if (now - lastRequestTimeRef.current >= 1000) {
-        statsRef.current.requestsPerSec = requestCountRef.current;
-        requestCountRef.current = 0;
-        lastRequestTimeRef.current = now;
-      }
-
-      setStats({ ...statsRef.current });
-    },
-    [particles.length, layoutTree]
-  );
+  }, [config]);
 
   // Animation loop
   useEffect(() => {
@@ -224,17 +229,65 @@ export const App: React.FC = () => {
   // Generate test request
   const handleGenerateTestRequest = useCallback(
     (targetId: string, method: string) => {
-      if (!config) return;
+      if (!config || !layoutTree || !configRef.current) return;
 
-      const event: RequestEvent = {
-        type: "single_request",
-        target: targetId,
+      const cfg = configRef.current;
+      statsRef.current.messagesReceived++;
+
+      const targetNode = targetMapRef.current.get(targetId);
+      if (!targetNode) {
+        statsRef.current.unknownTargets++;
+        setStats({ ...statsRef.current });
+        return;
+      }
+
+      const path = findPathToTarget(cfg.tree, targetId);
+      if (!path) {
+        statsRef.current.unknownTargets++;
+        setStats({ ...statsRef.current });
+        return;
+      }
+
+      if (particles.length >= cfg.animation.maxParticles) {
+        statsRef.current.eventsDropped++;
+        setStats({ ...statsRef.current });
+        return;
+      }
+
+      const pathCoords = path.map((node) => {
+        const layoutNode = findLayoutNode(layoutTree, node.id);
+        return layoutNode
+          ? { x: layoutNode.x, y: layoutNode.y }
+          : { x: 0, y: 0 };
+      });
+
+      const particle: Particle = {
+        id: createParticleId(),
+        path: pathCoords,
         method,
+        startTime: Date.now(),
+        edgeDurationMs: cfg.animation.edgeDurationMs,
+        totalDuration:
+          (path.length - 1) * cfg.animation.edgeDurationMs +
+          cfg.animation.targetFlashDurationMs,
       };
 
-      handleRequestEvent(event, config);
+      setParticles((prev) => [...prev, particle]);
+      animationEngineRef.current?.addParticle(particle);
+
+      statsRef.current.eventsVisualized++;
+      requestCountRef.current++;
+
+      const now = Date.now();
+      if (now - lastRequestTimeRef.current >= 1000) {
+        statsRef.current.requestsPerSec = requestCountRef.current;
+        requestCountRef.current = 0;
+        lastRequestTimeRef.current = now;
+      }
+
+      setStats({ ...statsRef.current });
     },
-    [config, handleRequestEvent]
+    [config, layoutTree, particles.length]
   );
 
   if (error) {
